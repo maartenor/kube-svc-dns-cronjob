@@ -137,10 +137,10 @@ spec:
     spec:
       template:
         spec:
-          serviceAccountName: external-ip-collector-sa  # Service account with needed permissions
+          serviceAccountName: external-ip-collector-sa
           containers:
           - name: external-ip-collector
-            image: bitnami/kubectl:latest  # Image with kubectl and needed tools
+            image: bitnami/kubectl:latest
             command:
             - /bin/bash
             - -c
@@ -182,7 +182,7 @@ metadata:
 subjects:
 - kind: ServiceAccount
   name: external-ip-collector-sa
-  namespace: pihole  # Change this if deploying to a different namespace
+  namespace: pihole
 roleRef:
   kind: ClusterRole
   name: service-reader
