@@ -21,10 +21,10 @@ To use this with Pi-hole, you would need to:
 $ cat /mnt/nfs_client/pihole-external-ip-services-pvc-pvc-f5c3c31b-df14-45d9-bba2-b144fa33898b/external-ips-hosts.txt
 # K3s External Services - Auto-generated Wed Apr 23 18:22:18 UTC 2025
 
-192.168.179.200 traefik traefik.local traefik.traefik.svc.cluster.local
-192.168.179.203 prometheus prometheus.local prometheus.develop.svc.cluster.local
-192.168.179.207 argocd-server argocd-server.local argocd-server.argocd.svc.cluster.local
-192.168.179.208 youtransfer youtransfer.local youtransfer.develop.svc.cluster.local
+192.168.1.10 traefik traefik.local traefik.traefik.svc.cluster.local
+192.168.1.15 prometheus prometheus.local prometheus.develop.svc.cluster.local
+192.168.1.20 argocd-server argocd-server.local argocd-server.argocd.svc.cluster.local
+192.168.1.25 youtransfer youtransfer.local youtransfer.develop.svc.cluster.local
 
 # End of K3s External Services - Wed Apr 23 18:22:26 UTC 2025
 ```
