@@ -1,0 +1,189 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: external-ip-services-pvc
+  namespace: pihole
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-client  # Use the same storage class as in your example
+  resources:
+    requests:
+      storage: 500Mi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: external-ip-services-script
+  namespace: pihole
+data:
+  collect-external-ips.sh: |
+    #!/bin/bash
+    set -e
+    
+    OUTPUT_FILE="/data/external-ips-hosts.txt"
+    TEMP_FILE="/tmp/external-ips-temp.txt"
+    LOG_FILE="/data/external-ip-services.log"
+    LOG_MAX_SIZE=$((25*1024*1024))  # 25MB in bytes
+    HOSTS_HEADER="# K3s External Services - Auto-generated $(date)"
+    
+    # Function to rotate log if needed
+    rotate_log_if_needed() {
+      if [ -f "${LOG_FILE}" ]; then
+        # Check file size
+        log_size=$(stat -c%s "${LOG_FILE}" 2>/dev/null || echo 0)
+        log_age=$(find "${LOG_FILE}" -mtime +7 -print 2>/dev/null | wc -l)
+        
+        if [ ${log_size} -gt ${LOG_MAX_SIZE} ] || [ ${log_age} -gt 0 ]; then
+          timestamp=$(date +%Y%m%d-%H%M%S)
+          # mv "${LOG_FILE}" "${LOG_FILE}.${timestamp}"
+          cat "${LOG_FILE}" > "${LOG_FILE}.${timestamp}" || cp "${LOG_FILE}" "${LOG_FILE}.${timestamp}"
+          touch "${LOG_FILE}"
+          echo "$(date '+%Y-%m-%d %H:%M:%S') - Log rotated due to size or age" >> "${LOG_FILE}"
+        fi
+      fi
+    }
+    
+    # Function to log messages with timestamp
+    log_message() {
+      echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
+    }
+    
+    # Rotate log if needed before starting
+    rotate_log_if_needed
+    
+    log_message "Starting collection of K3s services with external IPs"
+    
+    # Clear temp file
+    echo "${HOSTS_HEADER}" > ${TEMP_FILE}
+    echo "" >> ${TEMP_FILE}
+    
+    # Get services from all namespaces and filter for external IPs
+    log_message "Collecting services from all namespaces"
+    
+    # Loop through all services in all namespaces
+    kubectl get namespaces -o name | cut -d/ -f2 | while read namespace; do
+      log_message "Processing namespace: ${namespace}"
+      
+      kubectl get services -n ${namespace} -o json | jq -r '.items[] | 
+        select(.status.loadBalancer.ingress != null) | 
+        select(.status.loadBalancer.ingress[].ip != null) | 
+        "\(.status.loadBalancer.ingress[].ip) \(.metadata.name) \(.metadata.name).local \(.metadata.name).\(.metadata.namespace).svc.cluster.local"' >> ${TEMP_FILE}
+    done
+    
+    # Check if we found any services
+    if [ $(grep -v "^#" ${TEMP_FILE} | grep -v "^$" | wc -l) -eq 0 ]; then
+      log_message "No services with external IPs found"
+      echo "# No services with external IPs found" >> ${TEMP_FILE}
+    else
+      log_count=$(grep -v "^#" ${TEMP_FILE} | grep -v "^$" | wc -l)
+      log_message "Found ${log_count} services with external IPs"
+    fi
+    
+    # Add comment at the end
+    echo "" >> ${TEMP_FILE}
+    echo "# End of K3s External Services - $(date)" >> ${TEMP_FILE}
+    
+    # Create a temp file with sorted entries
+    SORT_TEMP="/tmp/sort-temp.txt"
+    COMMENTED_SORT="/tmp/commented-sort.txt"
+    
+    # Write header to sort temp
+    head -n 2 ${TEMP_FILE} > ${SORT_TEMP}
+    
+    # Extract, sort by service name (2nd field) then by IP (1st field), and append to sort temp
+    grep -v "^#" ${TEMP_FILE} | grep -v "^$" | sort -k2,2 -k1,1 >> ${SORT_TEMP}
+    
+    # Create commented version sorted by service name
+    echo "# Alternative sorting by service name:" > ${COMMENTED_SORT}
+    grep -v "^#" ${TEMP_FILE} | grep -v "^$" | sort -k2,2 | sed 's/^/# /' >> ${COMMENTED_SORT}
+    
+    # Add footer to sort temp
+    tail -n 2 ${TEMP_FILE} >> ${SORT_TEMP}
+    
+    # Add commented version after the sorted list but before the footer
+    head -n -2 ${SORT_TEMP} > "/tmp/temp-without-footer.txt"
+    cat "/tmp/temp-without-footer.txt" > ${SORT_TEMP}
+    echo "" >> ${SORT_TEMP}
+    echo "# ------- Alternative sorting formats -------" >> ${SORT_TEMP}
+    cat ${COMMENTED_SORT} >> ${SORT_TEMP}
+    echo "" >> ${SORT_TEMP}
+    tail -n 2 ${TEMP_FILE} >> ${SORT_TEMP}
+    
+    # Replace the hosts file with updated content
+    cat ${SORT_TEMP} > ${OUTPUT_FILE} || cp ${SORT_TEMP} ${OUTPUT_FILE}
+    # mv ${SORT_TEMP} ${OUTPUT_FILE}
+    
+    log_message "External IPs collection completed. Results saved to ${OUTPUT_FILE}"
+    
+    # Print the results for logging (limited to first 10 entries to avoid huge logs)
+    log_message "First 10 external IPs and FQDNs collected (if any):"
+    head -n 12 ${OUTPUT_FILE} >> ${LOG_FILE}
+    if [ $(wc -l < ${OUTPUT_FILE}) -gt 12 ]; then
+      log_message "... and $(( $(wc -l < ${OUTPUT_FILE}) - 12 )) more entries"
+    fi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: external-ip-services-collector
+  namespace: pihole
+spec:
+  schedule: "0 */6 * * *"  # Run every 6 hours
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  successfulJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: external-ip-collector-sa  # Service account with needed permissions
+          containers:
+          - name: external-ip-collector
+            image: bitnami/kubectl:latest  # Image with kubectl and needed tools
+            command:
+            - /bin/bash
+            - -c
+            - /scripts/collect-external-ips.sh
+            volumeMounts:
+            - name: scripts-volume
+              mountPath: /scripts
+            - name: data-volume
+              mountPath: /data
+          restartPolicy: OnFailure
+          volumes:
+          - name: scripts-volume
+            configMap:
+              name: external-ip-services-script
+              defaultMode: 0755
+          - name: data-volume
+            persistentVolumeClaim:
+              claimName: external-ip-services-pvc
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: external-ip-collector-sa
+  namespace: pihole
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: service-reader
+rules:
+- apiGroups: [""]
+  resources: ["services", "namespaces"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: external-ip-collector-rb
+subjects:
+- kind: ServiceAccount
+  name: external-ip-collector-sa
+  namespace: pihole  # Change this if deploying to a different namespace
+roleRef:
+  kind: ClusterRole
+  name: service-reader
+  apiGroup: rbac.authorization.k8s.io
